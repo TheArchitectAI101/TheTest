@@ -9,7 +9,8 @@ def greet(name):
 
 def main():
     """Print a greeting when the script is run directly."""
-    print(greet("you"))
+    # Hey Gemi — Tessa is working on this too.
+    print(greet("Gemi"))
 
 
 if __name__ == "__main__":
