@@ -5,7 +5,7 @@
 def build_message():
     parts = ["Good", "Girls", "Build", "Better", "Worlds"]
     message = " ".join(parts)
-    return message.capitalize()
+    return message.title()
 
 
 def main():
