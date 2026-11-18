@@ -45,7 +45,7 @@ class VeadotubeController:
 
     @property
     def url(self):
-        return f"ws://{self.address}?n={self.client_name}"
+        return f"ws://{self.address}/?n={self.client_name}"
 
     def connect(self):
         """Open the WebSocket connection to veadotube mini."""
