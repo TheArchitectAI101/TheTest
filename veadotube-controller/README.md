@@ -12,8 +12,9 @@ audio-reactive mouth movement mode.
 - On first run (`--test`): connects, activates TALKING for 3 seconds,
   deactivates it, then disconnects.
 - Audio-reactive mode (`--audio`): captures Windows system-output audio
-  (WASAPI loopback, including Discord voice) and alternates Nova's mouth
-  open/closed states with speech volume.
+  (WASAPI loopback, including Discord voice) and drives Nova's talking/idle
+  state via the `boolean` node `mini`. Nova's mouth opens and closes in
+  response to system audio volume — this is the approach Tessa confirmed works.
 - Prints connection status and state changes to the terminal.
 - On failure or disconnect, attempts to reset TALKING to OFF and mouth to
   closed first.
@@ -62,10 +63,17 @@ python controller.py --test
 python controller.py --audio
 ```
 
-The WebSocket address is configurable:
+The WebSocket address is configurable. By default the script will attempt to
+discover the port from veadotube mini's instance data folder (`%USERPROFILE%\.veadotube\instances`). If discovery succeeds, the discovered port is used; otherwise the default `50200` is used, or you can pass `--port <port>` manually.
 
 ```powershell
-python controller.py --audio --host 127.0.0.1 --port 51959
+python controller.py --audio
+```
+
+You can still override the port manually:
+
+```powershell
+python controller.py --audio --port 51959
 ```
 
 Other audio options:
@@ -84,14 +92,35 @@ python controller.py --audio --open-state talking --closed-state idle
 
 - **WebSocket server:** enable it in veadotube mini and note the port (the
   working test used `51959`; the default here is `50200`).
-- **Mouth states:** the audio-reactive mode drives the `stateEvents` node
-  `mini` (avatar state), not the push-to-talk node. The default state ids are
-  `talking` (open mouth) and `idle` (closed mouth). Check your avatar's actual
-  state ids in veadotube mini and pass `--open-state` / `--closed-state` if
-  they differ.
+- **Port discovery:** on startup, if `--port` is not explicitly set, the script
+  reads `%USERPROFILE%\.veadotube\instances` to find the running veadotube mini
+  instance's server port automatically. If no instance data is found, the
+  default `50200` is used and a message is printed.
+- **Mouth states:** the audio-reactive mode now drives the `boolean` node
+  `mini` (push-to-talk) via `set_talking()`, not the `stateEvents` node.
+  Nova's mouth opens and closes in response to system audio volume — this is
+  the approach Tessa confirmed works. The default talking/idle state ids are
+  `talking` and `idle`, but check your avatar's actual state ids and pass
+  `--open-state` / `--closed-state` if they differ (these are now mainly for
+  reference).
 - **Audio device:** PyAudioWPatch captures the default speakers' loopback
   device. Make sure the audio you want Nova to react to is playing through
   those speakers.
+
+## Protocol notes
+
+- WebSocket URL: `ws://127.0.0.1:50200/?n=GemiController`
+- Messages are sent on the `nodes` channel, prefixed with `nodes: `.
+- Push-to-talk is the `boolean` node with id `mini`; setting it to `true`
+  activates TALKING, `false` returns to idle.
+- Mouth movement in audio-reactive mode is driven by toggling the
+  `boolean` node `mini` on/off with `set_talking()`. This is the approach
+  Tessa confirmed works: Nova's mouth opens and closes in response to system
+  audio volume.
+- State ids `talking` and `idle` are the default avatar state names; they
+  are mainly kept for reference and the three-second test mode.
+
+Docs: https://veado.tube/docs/tech/api/ and https://veado.tube/docs/tech/api/nodes/
 
 ## Protocol notes
 

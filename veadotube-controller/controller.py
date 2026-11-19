@@ -26,6 +26,7 @@ Audio capture:
 import argparse
 import array
 import json
+import os
 import sys
 import time
 
@@ -35,6 +36,58 @@ import websocket  # pip install websocket-client
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 50200
 CLIENT_NAME = "GemiController"
+
+# veadotube instance discovery
+# veadotube mini stores running instance data in .veadotube/instances folder.
+# Each file is a JSON object with a "server" field like "127.0.0.1:51959".
+INSTANCES_DIR = os.path.join(os.path.expanduser("~"), ".veadotube", "instances")
+
+
+def discover_veadotube_port():
+    """Read veadotube mini instance data to discover the WebSocket port.
+
+    Returns the port number if a running instance is found, or None if discovery
+    fails (no instances folder, no files, or no server field).
+    """
+    if not os.path.isdir(INSTANCES_DIR):
+        print(
+            f"[discovery] Instances directory not found: {INSTANCES_DIR}"
+        )
+        return None
+
+    files = os.listdir(INSTANCES_DIR)
+    if not files:
+        print("[discovery] No instance files found in", INSTANCES_DIR)
+        return None
+
+    # Read each instance file and look for a "server" field like "127.0.0.1:51959"
+    for filename in files:
+        filepath = os.path.join(INSTANCES_DIR, filename)
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        server = data.get("server")
+        if not server:
+            continue
+
+        # Parse "host:port" format
+        parts = server.split(":")
+        if len(parts) == 2 and parts[1].isdigit():
+            port = int(parts[1])
+            print(
+                f"[discovery] Found veadotube mini instance on port {port} "
+                f"(from file '{filename}')"
+            )
+            return port
+
+    print(
+        "[discovery] No instance file with a 'server' field in "
+        f"{INSTANCES_DIR}"
+    )
+    return None
 
 NODE_CHANNEL = "nodes"
 BOOLEAN_NODE_TYPE = "boolean"
@@ -154,7 +207,13 @@ class VeadotubeController:
 
 
 class AudioMouth:
-    """Captures Windows system audio (WASAPI loopback) and drives mouth open/closed."""
+    """Captures Windows system audio (WASAPI loopback) and drives talking state.
+
+    Instead of using the stateEvents node for mouth images, this drives the
+    boolean `mini` push-to-talk node via set_talking(). This is the approach
+    that Tessa confirmed works: Nova's mouth opens/closes in response to system
+    audio when talking is toggled on/off.
+    """
 
     def __init__(
         self,
@@ -163,18 +222,14 @@ class AudioMouth:
         decay: float = 0.85,
         min_open_ms: int = 150,
         check_interval_ms: int = 50,
-        open_state=DEFAULT_OPEN_STATE,
-        closed_state=DEFAULT_CLOSED_STATE,
     ):
         self.controller = controller
         self.threshold = threshold
         self.decay = decay
         self.min_open_ms = min_open_ms
         self.check_interval_ms = check_interval_ms
-        self.open_state = open_state
-        self.closed_state = closed_state
         self._running = False
-        self._mouth_open = False
+        self._talking = False
         self._last_change_time = 0.0
         self._smoothed = 0.0
 
@@ -189,7 +244,7 @@ class AudioMouth:
         return (mean_square ** 0.5) / 32768.0
 
     def run(self):
-        """Open the loopback stream and drive the mouth until stopped."""
+        """Open the loopback stream and drive talking state until stopped."""
         try:
             import pyaudiowpatch as pyaudio
         except ImportError:
@@ -197,7 +252,7 @@ class AudioMouth:
             return 1
 
         self._running = True
-        self._mouth_open = False
+        self._talking = False
         self._smoothed = 0.0
         self._last_change_time = time.monotonic()
 
@@ -249,29 +304,21 @@ class AudioMouth:
                     else:
                         self._smoothed *= self.decay
 
-                    want_open = self._smoothed > self.threshold
+                    want_talking = self._smoothed > self.threshold
                     now = time.monotonic()
 
-                    if want_open and not self._mouth_open:
+                    if want_talking and not self._talking:
                         if now - self._last_change_time >= self.min_open_ms / 1000.0:
-                            self._set_mouth(True)
-                            self._mouth_open = True
+                            self.controller.set_talking(True)
+                            self._talking = True
                             self._last_change_time = now
-                    elif not want_open and self._mouth_open:
+                    elif not want_talking and self._talking:
                         if now - self._last_change_time >= self.min_open_ms / 1000.0:
-                            self._set_mouth(False)
-                            self._mouth_open = False
+                            self.controller.set_talking(False)
+                            self._talking = False
                             self._last_change_time = now
 
         return 0
-
-    def _set_mouth(self, open_: bool):
-        try:
-            self.controller.set_mouth(
-                open_, open_state=self.open_state, closed_state=self.closed_state
-            )
-        except Exception as exc:
-            print(f"[audio] Failed to set mouth state: {exc}")
 
     def stop(self):
         self._running = False
@@ -297,11 +344,19 @@ def run_three_second_test(controller: VeadotubeController):
 
 
 def run_audio_mode(controller: VeadotubeController, **kwargs):
-    """Audio-reactive mouth movement mode."""
+    """Audio-reactive mouth movement mode.
+
+    Drives the boolean `mini` push-to-talk node via set_talking(). This is
+    the approach that Tessa confirmed works: Nova's mouth opens/closes in
+    response to system audio when talking is toggled on/off.
+    """
     if not controller.connect():
         sys.exit(1)
 
-    mouth = AudioMouth(controller, **kwargs)
+    # Remove mode-specific kwargs that don't apply to the talking node.
+    audio_kwargs = {k: v for k, v in kwargs.items()
+                    if k in ("threshold", "decay", "min_open_ms")}
+    mouth = AudioMouth(controller, **audio_kwargs)
     try:
         mouth.run()
     except KeyboardInterrupt:
@@ -328,7 +383,22 @@ def main():
     mode.add_argument("--audio", action="store_true", help="Run audio-reactive mouth movement mode")
     args = parser.parse_args()
 
-    controller = VeadotubeController(host=args.host, port=args.port, client_name=args.client_name)
+    # Automatic WebSocket port discovery (unless --port was explicitly given).
+    # Veadotube changes its server port between restarts, so we read the instance
+    # data folder to find the actual port.
+    port = args.port
+    if port == DEFAULT_PORT:
+        discovered = discover_veadotube_port()
+        if discovered is not None:
+            port = discovered
+            print(f"[main] Using discovered port: {port}")
+        else:
+            print(
+                f"[main] Could not discover veadotube mini WebSocket port. "
+                f"Using default {DEFAULT_PORT}, or pass --port <port> manually."
+            )
+
+    controller = VeadotubeController(host=args.host, port=port, client_name=args.client_name)
 
     if args.audio:
         run_audio_mode(
